@@ -92,6 +92,11 @@ app.put('/photos', async (req, res) => {
     		message: 'OK',
     	};
 
+    	async function upload(oldPath, newPath) {
+			let oldFile = await fs.readFile(oldPath);
+			await fs.writeFile(newPath, oldFile);
+    	}
+
     	const form = formidable({ multiples: true });
 		form.parse(req, async (err, fields, files) => {
 		    
@@ -100,36 +105,70 @@ app.put('/photos', async (req, res) => {
 		      return;
 		    }
 
+		    //console.log(files.documents);
+		    var recordToInsert = [];
+
 		    //upload
 		    if(files.documents.length > 0 && fields.album) {
-		    	let result = [];
 
-		    	files.documents.forEach( async (fileInfo) => {
-		    		
-		    		//move temp file to correct album folder
-		    		let newPath = path.join(__dirname, config.imagesPath, fields.album.toLowerCase()) + '/' + fileInfo.name;
-		    		let oldFile = await fs.readFile(fileInfo.path);
-		    		let newFile = await fs.writeFile(newPath, oldFile);
+		    	recordToInsert = files.documents.map((fileInfo) => {
+		    		//only image file allowed
+		    		if(fileInfo.type.substring(0,5) == 'image') {
+		    			//console.log('allowed: ' + fileInfo.type);
+		    			//move temp file to correct album folder
+			    		let newPath = path.join(__dirname, config.imagesPath, fields.album.toLowerCase()) + '/' + fileInfo.name;
+			    		upload(fileInfo.path, newPath);
 
-		    		//check if file with the same filename exist
-		    		const stats = await fs.stat(newPath);
-		    		if(!stats.isFile()) {
-		    			//insert into db
-		    			let record = await db.asyncInsert({
-		    				album: fields.album, 
-		    				folder: fields.album.toLowerCase(), 
-		    				name: fileInfo.name 
-		    			});
-		    			//console.log(newPath + ': file not exist');
-		    			result.push(record);
+			    		return  {
+			    				album: fields.album, 
+			    				folder: fields.album.toLowerCase(), 
+			    				name: fileInfo.name 
+			    			};
+
 		    		}
 
 		    	});
 
-		    	//console.log(result);
+		    //single image
+		    } else {
+		    	
+		    	if ( (files.documents.type.substring(0,5) == 'image') && fields.album ) {
+		    		let newPath = path.join(__dirname, config.imagesPath, fields.album.toLowerCase()) + '/' + files.documents.name;
+				    upload(files.documents.path, newPath);
 
-		    	//insert into database
-		    	jsonResp.data = result.map(item => {
+			    	recordToInsert = [{
+			    				album: fields.album, 
+			    				folder: fields.album.toLowerCase(), 
+			    				name: files.documents.name 
+			    		}];
+		    	}
+
+		    }
+
+		    //console.log(recordToInsert);
+
+		    //insert into database
+		    if(recordToInsert.length > 0) {
+		    	//upsert
+		    	recordToInsert.forEach(async (record) => {
+		    		await db.asyncUpdate({
+			    				album: record.album, 
+			    				folder: record.folder.toLowerCase(), 
+			    				name: record.name 
+			    			},
+			    			{
+			    				album: record.album, 
+			    				folder: record.folder.toLowerCase(), 
+			    				name: record.name 
+			    			},
+			    			{ upsert: true }
+			    		);
+
+		    	});
+
+		    	//return result to response
+		    	let results = await db.asyncFind({ $or: recordToInsert });
+		    	jsonResp.data = results.map( (item) => {
 		    		return {
 		    			id: item._id,
 		    			album: item.album,
@@ -138,12 +177,9 @@ app.put('/photos', async (req, res) => {
     					raw: config.url + config.imagesURI + '/' + item.folder + '/' + item.name
 		    		}
 		    	});
-
-		    	res.json(jsonResp);
-
-		    } else {
-		    	res.json({ error : true });
 		    }
+		    
+		    res.json(jsonResp);
 		    
 		});
 
@@ -157,7 +193,9 @@ app.put('/photos', async (req, res) => {
 app.delete('/photos/:album/:filename', async (req, res) => {
 	
 	try {
-    	await db.asyncRemove({folder: req.params.album, name: req.params.filename});
+		//TODO: check if file actually exist
+
+    	await db.asyncRemove({folder: req.params.album, name: req.params.filename}, { multi: true });
     	await fs.unlink(path.join(__dirname, config.imagesPath, req.params.album.toLowerCase()) + '/' + req.params.filename);
 
     	res.json({"message": "OK"});
@@ -172,7 +210,20 @@ app.delete('/photos/:album/:filename', async (req, res) => {
 app.delete('/photos', async (req, res) => {
 	
 	try {
-    	console.log(req.body);
+    	//console.log(req.body);
+    	//TODO: check if file actually exist
+
+
+    	if(req.body.length > 0) {
+    		req.body.forEach(async (fileInfo) => {  			
+    			//split fileInfo.documents comma separated
+    			let files = fileInfo.documents.split(',');
+    			files.forEach( async (file) => {
+    				await db.asyncRemove({folder: fileInfo.album.toLowerCase(), name: file.trim()}, { multi: true });
+    				await fs.unlink(path.join(__dirname, config.imagesPath, fileInfo.album.toLowerCase()) + '/' + file.trim());
+    			});
+    		});
+    	}
 
     	res.json({"message": "OK"});
 
@@ -206,7 +257,7 @@ app.get('/db/setup', async (req, res) => {
     		});
 
     		await db.asyncInsert(record);
-    		console.log(content);
+    		//console.log(content);
     	});
 
     	//console.log(files);
